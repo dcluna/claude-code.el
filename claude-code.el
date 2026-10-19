@@ -1315,17 +1315,33 @@ it's remembered for the current directory."
           (puthash current-dir selected-buffer claude-code--directory-buffer-map))
         selected-buffer))))
 
-(defun claude-code--get-or-prompt-for-buffer ()
+(defun claude-code--get-or-prompt-for-buffer (&optional force-prompt)
   "Get Claude buffer for current directory or prompt for selection.
 
-First checks for Claude buffers in the current directory. If there are
-multiple, prompts the user to select one. If there are none, checks if
-there's a remembered selection for this directory. If not, and there are
-other Claude buffers running, prompts the user to select one. Returns
-the buffer or nil."
+If FORCE-PROMPT is non-nil, prompt the user to select from all running
+Claude buffers and remember the selection for the current directory.
+
+Otherwise, a live remembered selection for this directory wins. Next,
+checks for Claude buffers in the current directory. If there are
+multiple, prompts the user to select one. If there are none, and there
+are other Claude buffers running, prompts the user to select one.
+Returns the buffer or nil."
   (let* ((current-dir (claude-code--directory))
+         (remembered-buffer (gethash current-dir claude-code--directory-buffer-map))
          (dir-buffers (claude-code--find-claude-buffers-for-directory current-dir)))
     (cond
+     ;; Explicit re-selection - prompt from all buffers and remember the choice
+     (force-prompt
+      (when-let ((selected-buffer
+                  (claude-code--select-buffer-from-choices
+                   (format "Select Claude instance for %s: "
+                           (abbreviate-file-name current-dir))
+                   (claude-code--find-all-claude-buffers))))
+        (puthash current-dir selected-buffer claude-code--directory-buffer-map)
+        selected-buffer))
+     ;; Remembered selection for this directory
+     ((and remembered-buffer (buffer-live-p remembered-buffer))
+      remembered-buffer)
      ;; Multiple buffers for this directory - prompt for selection
      ((> (length dir-buffers) 1)
       (claude-code--select-buffer-from-choices
@@ -1336,16 +1352,9 @@ the buffer or nil."
      ;; Single buffer for this directory - use it
      ((= (length dir-buffers) 1)
       (car dir-buffers))
-     ;; No buffers for this directory - check remembered or prompt for other directories
-     (t
-      ;; Check for remembered selection for this directory
-      (let ((remembered-buffer (gethash current-dir claude-code--directory-buffer-map)))
-        (if (and remembered-buffer (buffer-live-p remembered-buffer))
-            remembered-buffer
-          ;; No valid remembered buffer, check for other Claude instances
-          (let ((other-buffers (claude-code--find-all-claude-buffers)))
-            (when other-buffers
-              (claude-code--prompt-for-claude-buffer)))))))))
+     ;; No buffers for this directory - prompt for other directories
+     ((claude-code--find-all-claude-buffers)
+      (claude-code--prompt-for-claude-buffer)))))
 
 (defun claude-code--switch-to-selected-buffer (selected-buffer)
   "Switch to SELECTED-BUFFER if it's not the current buffer.
@@ -1445,12 +1454,15 @@ LINE-END is the ending line number for a range.  If nil, format single line."
           (format "@%s:%d-%d" file start end)
         (format "@%s:%d" file start)))))
 
-(defun claude-code--do-send-command (cmd)
+(defun claude-code--do-send-command (cmd &optional force-prompt)
   "Send a command CMD to Claude if Claude buffer exists.
+
+If FORCE-PROMPT is non-nil, re-select the Claude buffer for the current
+directory instead of reusing the remembered one.
 
 After sending the command, move point to the end of the buffer.
 Returns the selected Claude buffer or nil."
-  (if-let ((claude-code-buffer (claude-code--get-or-prompt-for-buffer)))
+  (if-let ((claude-code-buffer (claude-code--get-or-prompt-for-buffer force-prompt)))
       (progn
         (with-current-buffer claude-code-buffer
           ;; Send the command string, without return
@@ -1917,7 +1929,8 @@ For large buffers, ask for confirmation first.
 
 With prefix ARG, prompt for instructions to add to the text before
 sending. With two prefix ARGs (C-u C-u), both add instructions and
-switch to Claude buffer."
+switch to Claude buffer. With a negative prefix ARG (\\[negative-argument]),
+re-select the Claude buffer for the current directory and remember it."
   (interactive "P")
   (let* ((text (if (use-region-p)
                    (buffer-substring-no-properties (region-beginning) (region-end))
@@ -1935,7 +1948,8 @@ switch to Claude buffer."
                         (format "%s\n\n%s" prompt text)
                       text)))
     (when full-text
-      (let ((selected-buffer (claude-code--do-send-command full-text)))
+      (let ((selected-buffer (claude-code--do-send-command
+                              full-text (< (prefix-numeric-value arg) 0))))
         (when (and (equal arg '(16)) selected-buffer) ; Only switch buffer with C-u C-u
           (pop-to-buffer selected-buffer))))))
 
